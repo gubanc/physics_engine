@@ -1,0 +1,62 @@
+{
+  "@spawn_buttons":
+  {
+    "colours":
+    {
+      "normal_border": "White",
+      "normal_bg": "Black",
+      "hovered_bg": "Black",
+      "active_bg": "Black"
+    }
+  },
+  "#circle_button":
+  {
+    "images":
+    {
+      "normal_image":
+      {
+        "path": "circle_button.png"
+      }
+    }
+  },
+  "#square_button":
+  {
+    "images":
+    {
+      "normal_image":
+      {
+        "path": "square_button.png"
+      }
+    }
+  },
+  "#triangle_button":
+  {
+    "images":
+    {
+      "normal_image":
+      {
+        "path": "triangle_button.png"
+      }
+    }
+  },
+  "#pentagon_button":
+  {
+    "images":
+    {
+      "normal_image":
+      {
+        "path": "pentagon_button.png"
+      }
+    }
+  },
+  "#collision_colour_button_enabled":
+  {
+    "images":
+    {
+      "normal_image":
+      {
+        "path": "active_button.png"
+      }
+    }
+  }
+}

@@ -23,6 +23,12 @@ def cross_scalar(scalar, v):
     return Vector(-scalar * v.y, scalar * v.x)
 
 
+def bias_greater_than(a, b):
+    bias_relative = 0.95
+    bias_absolute = 0.01
+    return a >= b * bias_relative + a * bias_absolute
+
+
 def generate_manifolds(objects):
     global manifolds
 
@@ -43,8 +49,7 @@ def generate_manifolds(objects):
 def handle_collisions(manifold):
     colliding = False
     if type(manifold.object_a.shape).__name__ == "Polygon" and type(manifold.object_b.shape).__name__ == "Polygon":
-        colliding = polygon_v_polygon(manifold.object_a, manifold.object_b, manifold) and polygon_v_polygon(
-            manifold.object_b, manifold.object_a, manifold)
+        colliding = polygon_v_polygon(manifold.object_a, manifold.object_b, manifold)
     elif type(manifold.object_a.shape).__name__ == "Circle" and type(manifold.object_b.shape).__name__ == "Polygon":
         colliding = circle_v_polygon(manifold.object_a, manifold.object_b, manifold)
     elif type(manifold.object_a.shape).__name__ == "Polygon" and type(manifold.object_b.shape).__name__ == "Circle":
@@ -92,11 +97,11 @@ def resolve_collision(manifold):
         inverse_sum = manifold.object_a.inv_mass + manifold.object_b.inv_mass + cross_a * cross_a * manifold.object_a.inv_inertia + cross_b * cross_b * manifold.object_b.inv_inertia
         friction_magnitude = -dot(v_rel, tangent) / inverse_sum
 
-        static_mu = (manifold.object_a.static_friction + manifold.object_b.static_friction) / 2
+        static_mu = (manifold.object_a.material.static_friction + manifold.object_b.material.static_friction) / 2
         if math.fabs(friction_magnitude) < impulse_magnitude * static_mu:
             friction_impulse = tangent.multiply(friction_magnitude)
         else:
-            dynamic_mu = (manifold.object_a.dynamic_friction + manifold.object_b.dynamic_friction) / 2
+            dynamic_mu = (manifold.object_a.material.dynamic_friction + manifold.object_b.material.dynamic_friction) / 2
             friction_impulse = tangent.multiply(-impulse_magnitude * dynamic_mu)
 
         manifold.object_a.velocity -= friction_impulse.multiply(manifold.object_a.inv_mass)
@@ -118,34 +123,144 @@ def find_axis_least_penetration(body1, body2, manifold):
     best_separation = -math.inf
     best_index = -1
 
-    for i in range(len(body1.shape.vector_vertices)):
-        j = (i + 1) % len(body1.shape.vector_vertices)
-        normal = (body1.shape.vector_vertices[i] - body1.shape.vector_vertices[j]).perpendicular().normalise()
-        support_body2 = body2.shape.get_support_point(-normal)
-        separation = dot(normal, support_body2 - body1.shape.vector_vertices[j])
+    inverse_m = body2.shape.rotation_matrix.transpose()
 
+    for i in range(len(body1.shape.vertices)):
+        j = (i + 1) % len(body1.shape.vertices)
+
+        # transform normal of body 1 into world space, and then into B's model space
+        normal = body1.shape.rotation_matrix.vector_multiply(body1.shape.normals[i])
+        normal = inverse_m.vector_multiply(normal)
+
+        # get support point of body 2 along normal
+        support_body2 = body2.shape.get_support_point(-normal)
+
+        # retrieve vertex on face of A, then transform into B's model space
+        v = body1.position + body1.shape.rotation_matrix.vector_multiply(body1.shape.vertices[i])
+        v = inverse_m.vector_multiply(v - body2.position)
+
+        # compute penetration distance
+        separation = dot(normal, support_body2 - v)
+
+        # keep the greatest distance
         if separation > best_separation:
             best_separation = separation
             best_index = i
             manifold.collision_normal = normal
 
-    return best_separation
+    return best_separation, best_index
+
+
+def find_incident_face(ref_poly, inc_poly, ref_index):
+    ref_normal = ref_poly.shape.rotation_matrix.vector_multiply(ref_poly.shape.normals[ref_index])
+    ref_normal = inc_poly.shape.rotation_matrix.transpose().vector_multiply(ref_normal)
+
+    inc_face = 0
+    min_dot = math.inf
+    for i in range(len(inc_poly.shape.normals)):
+        result = dot(ref_normal, inc_poly.shape.normals[i])
+        if result < min_dot:
+            inc_face = i
+            min_dot = result
+
+    j = (inc_face + 1) % len(inc_poly.shape.vertices)
+    return [inc_poly.shape.rotation_matrix.vector_multiply(inc_poly.shape.vertices[inc_face]) + inc_poly.position,
+            inc_poly.shape.rotation_matrix.vector_multiply(inc_poly.shape.vertices[j]) + inc_poly.position]
+
+
+def clip(normal, c, face):
+    sp = 0
+    out = [face[0], face[1]]
+
+    d1 = dot(normal, face[0]) - c
+    d2 = dot(normal, face[1]) - c
+
+    if d1 < 0:
+        out[sp] = face[0]
+        sp += 1
+    if d2 < 0:
+        out[sp] = face[1]
+        sp += 1
+
+    if d1 * d2 < 0.0:
+        alpha = d1 / (d1 - d2)
+        out[sp] = face[0] + (face[1] - face[0]).multiply(alpha)
+        sp += 1
+
+    return sp, out
 
 
 def polygon_v_polygon(body1, body2, manifold):
-    penetration_a = find_axis_least_penetration(body1, body2, manifold)
+    # REMEMBER TO CHANGE THE WAY NORMALS AND VERTICES INTERACT SO I CAN USE (I+1) % LENGTH INSTEAD OF (I-1) % LENGTH
+
+    penetration_a, face_a = find_axis_least_penetration(body1, body2, manifold)
     if penetration_a >= 0:
         return False
-    penetration_b = find_axis_least_penetration(body2, body1, manifold)
+
+    penetration_b, face_b = find_axis_least_penetration(body2, body1, manifold)
     if penetration_b >= 0:
         return False
 
-    manifold.penetration_depth = -min(penetration_a, penetration_b)
+    ref_poly, inc_poly, ref_index, flip = None, None, 0, False
+
+    if bias_greater_than(penetration_a, penetration_b):
+        ref_poly = body1
+        inc_poly = body2
+        ref_index = face_a
+        flip = False
+    else:
+        ref_poly = body2
+        inc_poly = body1
+        ref_index = face_b
+        flip = True
+
+    incident_face = find_incident_face(ref_poly, inc_poly, ref_index)
+
+    v1 = ref_poly.shape.rotation_matrix.vector_multiply(ref_poly.shape.vertices[ref_index]) + ref_poly.position
+    v2 = ref_poly.shape.rotation_matrix.vector_multiply(ref_poly.shape.vertices[(ref_index + 1) % len(ref_poly.shape.vertices)]) + ref_poly.position
+
+    side_plane_normal = (v2 - v1).normalise()
+
+    ref_face_normal = Vector(-side_plane_normal.y, side_plane_normal.x)
+
+    ref_c = dot(ref_face_normal, v1)
+    neg_side = -dot(side_plane_normal, v1)
+    pos_side = dot(side_plane_normal, v2)
+
+    sp, incident_face = clip(-side_plane_normal, neg_side, incident_face)
+    if sp < 2:
+        return False
+
+    sp, incident_face = clip(side_plane_normal, pos_side, incident_face)
+    if sp < 2:
+        return False
+
+    if flip:
+        manifold.collision_normal = -ref_face_normal
+    else:
+        manifold.collision_normal = ref_face_normal
+
+    cp = 0
+    separation = dot(ref_face_normal, incident_face[0]) - ref_c
+    if separation <= 0:
+        manifold.contacts.append(incident_face[0])
+        manifold.penetration_depth = -separation
+        cp += 1
+    else:
+        manifold.penetration_depth = 0
+
+    separation = dot(ref_face_normal, incident_face[1]) - ref_c
+    if separation <= 0:
+        manifold.contacts.append(incident_face[1])
+        manifold.penetration_depth += -separation
+        cp += 1
+        manifold.penetration_depth /= cp
+
     return True
 
 
 def polygon_v_circle(polygon, circle, manifold):
-    separation = math.inf
+    separation = -math.inf
     normal_of_col = None
     v1 = None
     v2 = None
@@ -155,15 +270,15 @@ def polygon_v_circle(polygon, circle, manifold):
     for i in range(len(polygon.shape.vertices)):
         normal = polygon.shape.normals[i]
         s = dot(normal, center - polygon.shape.vertices[i])
-        if s + circle.shape.radius < 0:
+        if s > circle.shape.radius:
             return False
-        if s < separation:
+        if s > separation:
             separation = s
             normal_of_col = normal
             v1 = polygon.shape.vertices[i]
             v2 = polygon.shape.vertices[(i+1) % len(polygon.shape.vertices)]
 
-    if separation > 0:
+    if separation < 0.0000001:
         manifold.collision_normal = -polygon.shape.rotation_matrix.vector_multiply(normal_of_col)
         manifold.penetration_depth = circle.shape.radius
         manifold.contacts.append(manifold.collision_normal.multiply(circle.shape.radius) + circle.position)
@@ -171,7 +286,7 @@ def polygon_v_circle(polygon, circle, manifold):
 
     dot1 = dot(center - v1, v2 - v1)
     dot2 = dot(center - v2, v1 - v2)
-    manifold.penetration_depth = circle.shape.radius + separation
+    manifold.penetration_depth = circle.shape.radius - separation
 
     if dot1 <= 0:
         if (center - v1).get_length_squared() > circle.shape.radius * circle.shape.radius:
@@ -190,7 +305,7 @@ def polygon_v_circle(polygon, circle, manifold):
     else:
         if dot(center - v1, normal_of_col) > circle.shape.radius:
             return False
-        manifold.collision_normal = -polygon.shape.rotation_matrix.vector_multiply(normal_of_col)
+        manifold.collision_normal = polygon.shape.rotation_matrix.vector_multiply(normal_of_col)
         manifold.contacts.append(manifold.collision_normal.multiply(circle.shape.radius) + circle.position)
         return True
 
